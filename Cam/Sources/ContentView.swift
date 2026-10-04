@@ -46,7 +46,8 @@ struct ContentView: View {
             }
             Color.white.opacity(flashOpacity).ignoresSafeArea().allowsHitTesting(false)
         }
-        .onAppear { engine.start() }
+        .onAppear { engine.start(); engine.histogramVisible = engine.showHistogram }
+        .onChange(of: engine.showHistogram) { _, v in engine.histogramVisible = v }
         .onChange(of: engine.photoFlashTick) { _, _ in
             flashOpacity = 0.85
             withAnimation(.easeOut(duration: 0.25)) { flashOpacity = 0 }

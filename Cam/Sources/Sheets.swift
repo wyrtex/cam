@@ -270,6 +270,15 @@ struct SettingsSheet: View {
                 }
                 .padding(.horizontal, 12)
                 .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.08)))
+                if engine.blurFaces {
+                    SectionTitle(text: "Жёсткость блюра")
+                    HStack {
+                        Slider(value: $engine.blurStrength, in: 0...1)
+                        Text("\(Int(engine.blurStrength * 100))%")
+                            .font(.system(size: 13, weight: .semibold, design: .monospaced)).foregroundColor(.white)
+                            .frame(width: 48)
+                    }
+                }
                 Text("Рамки рисуются только на экране и не попадают в запись. Блюр лиц, наоборот, применяется к самому видео и фото.")
                     .font(.footnote).foregroundColor(.white.opacity(0.55))
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)

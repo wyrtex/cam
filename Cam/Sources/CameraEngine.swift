@@ -47,6 +47,7 @@ private struct RenderState {
     var detectHands = false
     var detectFingers = false
     var blurFaces = false
+    var blurStrength: Double = 0.5
 }
 
 final class CameraEngine: NSObject, ObservableObject {
@@ -95,6 +96,7 @@ final class CameraEngine: NSObject, ObservableObject {
     @Published var detectHands = false { didSet { visionSettingChanged() } }
     @Published var detectFingers = false { didSet { visionSettingChanged() } }
     @Published var blurFaces = false { didSet { visionSettingChanged() } }
+    @Published var blurStrength: Double = 0.5 { didSet { syncRenderState() } }
     @Published var detections = Detections()
     @Published var aeafLocked = false
     @Published var highFPSSave: HighFPSSaveMode = .files
@@ -160,6 +162,7 @@ final class CameraEngine: NSObject, ObservableObject {
     private var lastAudioPublish = CFAbsoluteTimeGetCurrent()
     private var lastVideoSize = CGSize.zero
     private var captureFPS = 30
+    var histogramVisible = true
 
     private var recordingFlag = false
     private var lastVideoRes: VideoResolution = .uhd4k
@@ -241,7 +244,7 @@ final class CameraEngine: NSObject, ObservableObject {
         stateLock.lock()
         renderState = RenderState(look: look, lut: customLUT, intensity: lookIntensity,
                                   detectFaces: detectFaces, detectHands: detectHands,
-                                  detectFingers: detectFingers, blurFaces: blurFaces)
+                                  detectFingers: detectFingers, blurFaces: blurFaces, blurStrength: blurStrength)
         stateLock.unlock()
     }
 
@@ -1149,7 +1152,7 @@ final class CameraEngine: NSObject, ObservableObject {
         if frameCounter % stride == 0 { enqueuePreview(outSB) }
 
         let now = CFAbsoluteTimeGetCurrent()
-        if now - lastHistogramTime > 0.12 {
+        if histogramVisible, now - lastHistogramTime > 0.25 {
             lastHistogramTime = now
             computeHistogram(outPB)
         }
@@ -1215,7 +1218,7 @@ final class CameraEngine: NSObject, ObservableObject {
         guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &out) == kCVReturnSuccess, let dst = out else { return nil }
 
         let src = CIImage(cvPixelBuffer: pb)
-        let base = blurRects.isEmpty ? src : FaceBlur.apply(src, faces: blurRects)
+        let base = blurRects.isEmpty ? src : FaceBlur.apply(src, faces: blurRects, strength: state.blurStrength)
         let result = videoRenderer.apply(look: state.look, lut: state.lut, intensity: state.intensity, to: base)
         ciContext.render(result, to: dst, bounds: src.extent, colorSpace: rec709)
 
@@ -1373,7 +1376,7 @@ extension CameraEngine: AVCapturePhotoCaptureDelegate {
         let state = currentRenderState()
         if state.look != .none || state.blurFaces,
            var ci = CIImage(data: data, options: [.applyOrientationProperty: true]) {
-            if state.blurFaces { ci = FaceBlur.apply(ci, faces: VisionTracker.detectFaces(in: ci)) }
+            if state.blurFaces { ci = FaceBlur.apply(ci, faces: VisionTracker.detectFaces(in: ci), strength: state.blurStrength) }
             let out = photoRenderer.apply(look: state.look, lut: state.lut, intensity: state.intensity, to: ci)
             let cs = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
             let key = CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String)

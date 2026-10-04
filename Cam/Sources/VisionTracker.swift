@@ -4,10 +4,16 @@ import CoreImage
 import CoreGraphics
 
 /// Normalized rectangles, origin = top-left, 0...1.
+struct FingerInfo: Equatable {
+    let name: String
+    let rect: CGRect
+    let tip: CGPoint
+}
+
 struct Detections: Equatable {
     var faces: [CGRect] = []
     var hands: [CGRect] = []
-    var fingers: [CGRect] = []
+    var fingers: [FingerInfo] = []
 }
 
 /// Apple Vision: faces, hand pose, fingers. Runs on a background queue, one request at a time.
@@ -62,12 +68,20 @@ final class VisionTracker {
                         if let r = Self.bounds(of: pts, pad: 0.02) { result.hands.append(r) }
                     }
                     if wantFingers {
-                        let groups: [VNHumanHandPoseObservation.JointsGroupName] = [.thumb, .indexFinger, .middleFinger, .ringFinger, .littleFinger]
-                        for g in groups {
-                            if let pts = try? obs.recognizedPoints(g) {
-                                let loc = pts.values.filter { $0.confidence > 0.25 }.map { $0.location }
-                                if loc.count >= 2, let r = Self.bounds(of: loc, pad: 0.008) { result.fingers.append(r) }
-                            }
+                        let groups: [(VNHumanHandPoseObservation.JointsGroupName, VNHumanHandPoseObservation.JointName, String)] = [
+                            (.thumb, .thumbTip, "Большой"),
+                            (.indexFinger, .indexTip, "Указательный"),
+                            (.middleFinger, .middleTip, "Средний"),
+                            (.ringFinger, .ringTip, "Безымянный"),
+                            (.littleFinger, .littleTip, "Мизинец")
+                        ]
+                        for (g, tipName, label) in groups {
+                            guard let pts = try? obs.recognizedPoints(g) else { continue }
+                            let loc = pts.values.filter { $0.confidence > 0.25 }.map { $0.location }
+                            guard loc.count >= 2, let r = Self.bounds(of: loc, pad: 0.008),
+                                  let tip = pts[tipName], tip.confidence > 0.25 else { continue }
+                            result.fingers.append(FingerInfo(name: label, rect: r,
+                                                             tip: CGPoint(x: tip.location.x, y: 1 - tip.location.y)))
                         }
                     }
                 }
@@ -109,7 +123,8 @@ final class VisionTracker {
 
 enum FaceBlur {
     /// Blurs round regions around the given faces (normalized, top-left origin).
-    static func apply(_ image: CIImage, faces: [CGRect]) -> CIImage {
+    /// `strength` 0...1 (0 = barely, 1 = very strong).
+    static func apply(_ image: CIImage, faces: [CGRect], strength: Double = 0.5) -> CIImage {
         guard !faces.isEmpty else { return image }
         let e = image.extent
         var mask = CIImage(color: CIColor.black).cropped(to: e)
@@ -126,7 +141,7 @@ enum FaceBlur {
             ])?.outputImage else { continue }
             mask = g.cropped(to: e).applyingFilter("CILightenBlendMode", parameters: [kCIInputBackgroundImageKey: mask])
         }
-        let sigma = max(18.0, Double(e.width) * 0.014)
+        let sigma = max(2.0, Double(e.width) * (0.001 + 0.03 * pow(max(0, min(1, strength)), 1.5)))
         let blurred = image.clampedToExtent().applyingGaussianBlur(sigma: sigma).cropped(to: e)
         return blurred
             .applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: image, kCIInputMaskImageKey: mask])

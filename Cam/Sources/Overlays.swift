@@ -122,7 +122,18 @@ struct DetectionOverlay: View {
             }
             if faces { for r in d.faces { box(r, Color.green, 2) } }
             if hands { for r in d.hands { box(r, Color.cyan, 2) } }
-            if fingers { for r in d.fingers { box(r, Color.orange, 1.5) } }
+            if fingers {
+                for f in d.fingers {
+                    box(f.rect, Color.orange, 1.5)
+                    let tip = CGPoint(x: f.tip.x * size.width, y: f.tip.y * size.height)
+                    ctx.fill(Path(ellipseIn: CGRect(x: tip.x - 4.5, y: tip.y - 4.5, width: 9, height: 9)), with: .color(.red))
+                    ctx.stroke(Path(ellipseIn: CGRect(x: tip.x - 4.5, y: tip.y - 4.5, width: 9, height: 9)), with: .color(.white), lineWidth: 1)
+                    let label = Text(f.name).font(.system(size: 10, weight: .bold)).foregroundColor(.white)
+                    let x = f.rect.midX * size.width
+                    let y = max(f.rect.minY * size.height - 8, 8)
+                    ctx.draw(label, at: CGPoint(x: x, y: y), anchor: .center)
+                }
+            }
         }
         .allowsHitTesting(false)
     }

@@ -13,6 +13,8 @@ struct RecordConfig {
     let codec: VideoCodec
     let quality: BitrateQuality
     let interval: Double
+    let decimate: Int
+    let saveToFiles: Bool
 }
 
 private final class Recording {
@@ -26,6 +28,7 @@ private final class Recording {
     var frameCount = 0
     var nextLapse: Double = 0
     var dropped = 0
+    var rawIndex = 0
 
     init(writer: AVAssetWriter, vInput: AVAssetWriterInput, aInput: AVAssetWriterInput?, url: URL, cfg: RecordConfig) {
         self.writer = writer
@@ -40,6 +43,10 @@ private struct RenderState {
     var look: LookFilter = .none
     var lut: CubeLUT?
     var intensity: Double = 1
+    var detectFaces = false
+    var detectHands = false
+    var detectFingers = false
+    var blurFaces = false
 }
 
 final class CameraEngine: NSObject, ObservableObject {
@@ -84,6 +91,14 @@ final class CameraEngine: NSObject, ObservableObject {
     @Published var lookIntensity: Double = 1 { didSet { syncRenderState() } }
     @Published var customLUT: CubeLUT? { didSet { syncRenderState() } }
 
+    @Published var detectFaces = false { didSet { visionSettingChanged() } }
+    @Published var detectHands = false { didSet { visionSettingChanged() } }
+    @Published var detectFingers = false { didSet { visionSettingChanged() } }
+    @Published var blurFaces = false { didSet { visionSettingChanged() } }
+    @Published var detections = Detections()
+    @Published var aeafLocked = false
+    @Published var highFPSSave: HighFPSSaveMode = .files
+
     @Published var grid: GridType = .thirds
     @Published var guide: FrameGuide = .off
     @Published var showHistogram = true
@@ -124,6 +139,10 @@ final class CameraEngine: NSObject, ObservableObject {
     private var configured = false
 
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
+    private let vision = VisionTracker()
+    private var lastVisionTime = CFAbsoluteTimeGetCurrent()
+    private var smallPool: CVPixelBufferPool?
+    private var smallPoolSize = (0, 0)
     private let videoRenderer = LookRenderer()
     private let photoRenderer = LookRenderer()
     private let rec709 = CGColorSpace(name: CGColorSpace.itur_709) ?? CGColorSpaceCreateDeviceRGB()
@@ -157,6 +176,9 @@ final class CameraEngine: NSObject, ObservableObject {
 
     func start() {
         UIApplication.shared.isIdleTimerDisabled = true
+        vision.onResult = { [weak self] d in
+            DispatchQueue.main.async { self?.detections = d }
+        }
         Task {
             let cam = await AVCaptureDevice.requestAccess(for: .video)
             _ = await AVCaptureDevice.requestAccess(for: .audio)
@@ -186,6 +208,10 @@ final class CameraEngine: NSObject, ObservableObject {
         NotificationCenter.default.addObserver(forName: AVCaptureSession.runtimeErrorNotification, object: session, queue: .main) { [weak self] _ in
             self?.sessionQueue.async { if let s = self?.session, !s.isRunning { s.startRunning() } }
         }
+        NotificationCenter.default.addObserver(forName: AVCaptureDevice.subjectAreaDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self, !self.aeafLocked else { return }
+            self.resetFocusToContinuous()
+        }
         NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] _ in
             self?.updateMicName()
         }
@@ -213,8 +239,18 @@ final class CameraEngine: NSObject, ObservableObject {
 
     private func syncRenderState() {
         stateLock.lock()
-        renderState = RenderState(look: look, lut: customLUT, intensity: lookIntensity)
+        renderState = RenderState(look: look, lut: customLUT, intensity: lookIntensity,
+                                  detectFaces: detectFaces, detectHands: detectHands,
+                                  detectFingers: detectFingers, blurFaces: blurFaces)
         stateLock.unlock()
+    }
+
+    private func visionSettingChanged() {
+        syncRenderState()
+        if !detectFaces && !detectHands && !detectFingers && !blurFaces {
+            vision.reset()
+            detections = Detections()
+        }
     }
 
     private func currentRenderState() -> RenderState {
@@ -468,6 +504,8 @@ final class CameraEngine: NSObject, ObservableObject {
         do {
             try d.lockForConfiguration()
             d.videoZoomFactor = minZ
+            if fmt.isSmoothAutoFocusSupported { d.isSmoothAutoFocusEnabled = !isPhoto }
+            d.autoFocusRangeRestriction = .none
             d.unlockForConfiguration()
         } catch {}
 
@@ -686,35 +724,106 @@ final class CameraEngine: NSObject, ObservableObject {
         }
     }
 
+    private func devicePoint(_ point: CGPoint, isFront: Bool) -> CGPoint {
+        let angle = rotationCoordinator?.videoRotationAngleForHorizonLevelCapture ?? 90
+        let x = isFront ? 1 - point.x : point.x
+        let y = point.y
+        var p: CGPoint
+        switch Int(angle.rounded()) % 360 {
+        case 0: p = CGPoint(x: x, y: y)
+        case 180: p = CGPoint(x: 1 - x, y: 1 - y)
+        case 270: p = CGPoint(x: 1 - y, y: x)
+        default: p = CGPoint(x: y, y: 1 - x)
+        }
+        p.x = min(max(p.x, 0), 1)
+        p.y = min(max(p.y, 0), 1)
+        return p
+    }
+
+    /// Tap: focus + metering at the point, then keep tracking (continuous AF/AE around that point).
     /// `point` is normalized (0...1) inside the visible preview.
     func focus(at point: CGPoint) {
         autoFocus = true
+        aeafLocked = false
+        let isFront = lens == .front
+        let autoExp = autoExposure
+        sessionQueue.async {
+            guard let d = self.device else { return }
+            let p = self.devicePoint(point, isFront: isFront)
+            do {
+                try d.lockForConfiguration()
+                if d.isFocusPointOfInterestSupported {
+                    d.focusPointOfInterest = p
+                    if d.isFocusModeSupported(.continuousAutoFocus) { d.focusMode = .continuousAutoFocus }
+                    else if d.isFocusModeSupported(.autoFocus) { d.focusMode = .autoFocus }
+                }
+                if autoExp, d.isExposurePointOfInterestSupported {
+                    d.exposurePointOfInterest = p
+                    if d.isExposureModeSupported(.continuousAutoExposure) { d.exposureMode = .continuousAutoExposure }
+                }
+                d.isSubjectAreaChangeMonitoringEnabled = true
+                d.unlockForConfiguration()
+            } catch {}
+        }
+    }
+
+    /// Long press: focus + exposure at the point and lock both (AE/AF LOCK).
+    func lockFocusAndExposure(at point: CGPoint) {
+        autoFocus = true
+        aeafLocked = true
         let isFront = lens == .front
         sessionQueue.async {
             guard let d = self.device else { return }
-            let angle = self.rotationCoordinator?.videoRotationAngleForHorizonLevelCapture ?? 90
-            let x = isFront ? 1 - point.x : point.x
-            let y = point.y
-            var p: CGPoint
-            switch Int(angle.rounded()) % 360 {
-            case 0: p = CGPoint(x: x, y: y)
-            case 180: p = CGPoint(x: 1 - x, y: 1 - y)
-            case 270: p = CGPoint(x: 1 - y, y: x)
-            default: p = CGPoint(x: y, y: 1 - x)
-            }
-            p.x = min(max(p.x, 0), 1)
-            p.y = min(max(p.y, 0), 1)
+            let p = self.devicePoint(point, isFront: isFront)
             do {
                 try d.lockForConfiguration()
                 if d.isFocusPointOfInterestSupported && d.isFocusModeSupported(.autoFocus) {
                     d.focusPointOfInterest = p
                     d.focusMode = .autoFocus
                 }
-                let autoExp = DispatchQueue.main.sync { self.autoExposure }
-                if autoExp, d.isExposurePointOfInterestSupported && d.isExposureModeSupported(.autoExpose) {
+                if d.isExposurePointOfInterestSupported && d.isExposureModeSupported(.autoExpose) {
                     d.exposurePointOfInterest = p
                     d.exposureMode = .autoExpose
                 }
+                d.isSubjectAreaChangeMonitoringEnabled = false
+                d.unlockForConfiguration()
+            } catch {}
+            // Let AF/AE converge, then freeze them.
+            self.sessionQueue.asyncAfter(deadline: .now() + 0.9) {
+                guard DispatchQueue.main.sync(execute: { self.aeafLocked }) else { return }
+                do {
+                    try d.lockForConfiguration()
+                    if d.isFocusModeSupported(.locked) { d.focusMode = .locked }
+                    if d.isExposureModeSupported(.locked) { d.exposureMode = .locked }
+                    d.unlockForConfiguration()
+                } catch {}
+            }
+        }
+        flashMessage("AE/AF заблокированы")
+    }
+
+    func unlockFocusAndExposure() {
+        aeafLocked = false
+        resetFocusToContinuous()
+    }
+
+    private func resetFocusToContinuous() {
+        let autoFocusOn = autoFocus
+        let autoExp = autoExposure
+        sessionQueue.async {
+            guard let d = self.device else { return }
+            do {
+                try d.lockForConfiguration()
+                let center = CGPoint(x: 0.5, y: 0.5)
+                if autoFocusOn {
+                    if d.isFocusPointOfInterestSupported { d.focusPointOfInterest = center }
+                    if d.isFocusModeSupported(.continuousAutoFocus) { d.focusMode = .continuousAutoFocus }
+                }
+                if autoExp {
+                    if d.isExposurePointOfInterestSupported { d.exposurePointOfInterest = center }
+                    if d.isExposureModeSupported(.continuousAutoExposure) { d.exposureMode = .continuousAutoExposure }
+                }
+                d.isSubjectAreaChangeMonitoringEnabled = true
                 d.unlockForConfiguration()
             } catch {}
         }
@@ -817,6 +926,31 @@ final class CameraEngine: NSObject, ObservableObject {
         }
     }
 
+    private func saveVideoToFiles(at url: URL) {
+        let fm = FileManager.default
+        guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { saveVideo(at: url); return }
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMdd-HHmmss"
+        let dest = docs.appendingPathComponent("Cam-\(f.string(from: Date())).mov")
+        do {
+            try fm.moveItem(at: url, to: dest)
+            flashMessage("Сохранено: Файлы → На iPhone → Cam Pro")
+        } catch {
+            saveVideo(at: url)
+        }
+    }
+
+    /// Compares the file duration with wall-clock time to catch timing bugs.
+    private func checkDuration(of rec: Recording) {
+        guard rec.cfg.mode == .video else { return }
+        let asset = AVURLAsset(url: rec.url)
+        let fileSec = CMTimeGetSeconds(asset.duration)
+        let wall = DispatchQueue.main.sync { self.recordSeconds }
+        if wall > 2, fileSec.isFinite, abs(fileSec - wall) / wall > 0.2 {
+            flashMessage(String(format: "Длительность файла %.1f с, запись %.1f с", fileSec, wall))
+        }
+    }
+
     private func saveVideo(at url: URL) {
         PHPhotoLibrary.shared().performChanges({
             PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
@@ -850,7 +984,17 @@ final class CameraEngine: NSObject, ObservableObject {
 
     func startRecording() {
         guard mode.isVideoLike, !isRecording, session.isRunning else { return }
-        let cfg = RecordConfig(mode: mode, fps: fps, codec: codec, quality: bitrateQuality, interval: timelapseInterval)
+        var decimate = 1
+        var toFiles = false
+        if mode == .video && fps >= 100 {
+            switch highFPSSave {
+            case .files: toFiles = true
+            case .photosSlowmo: break
+            case .photosReal60: decimate = max(1, fps / 60)
+            }
+        }
+        let cfg = RecordConfig(mode: mode, fps: fps, codec: codec, quality: bitrateQuality, interval: timelapseInterval,
+                               decimate: decimate, saveToFiles: toFiles)
         isRecording = true
         recordingFlag = true
         recordSeconds = 0
@@ -881,7 +1025,9 @@ final class CameraEngine: NSObject, ObservableObject {
                 rec.aInput?.markAsFinished()
                 rec.writer.finishWriting {
                     if rec.writer.status == .completed {
-                        self.saveVideo(at: rec.url)
+                        self.checkDuration(of: rec)
+                        if rec.cfg.saveToFiles { self.saveVideoToFiles(at: rec.url) }
+                        else { self.saveVideo(at: rec.url) }
                     } else {
                         self.flashMessage("Ошибка записи: \(rec.writer.error?.localizedDescription ?? "")")
                         try? FileManager.default.removeItem(at: rec.url)
@@ -909,7 +1055,7 @@ final class CameraEngine: NSObject, ObservableObject {
             flashMessage("Не удалось создать файл записи")
             return nil
         }
-        let outFPS = cfg.mode == .video ? cfg.fps : 30
+        let outFPS = cfg.mode == .video ? max(cfg.fps / max(cfg.decimate, 1), 1) : 30
         var bitrate = Double(w * h) * Double(outFPS) * cfg.quality.bpp * (cfg.codec == .h264 ? 1.6 : 1.0)
         bitrate = min(max(bitrate, 4_000_000), 400_000_000)
 
@@ -968,9 +1114,22 @@ final class CameraEngine: NSObject, ObservableObject {
         }
 
         let state = currentRenderState()
+
+        if state.detectFaces || state.detectHands || state.detectFingers || state.blurFaces {
+            let now = CFAbsoluteTimeGetCurrent()
+            if now - lastVisionTime > 0.04, vision.isIdle(), let small = makeSmallBuffer(from: pb) {
+                lastVisionTime = now
+                vision.process(small,
+                               faces: state.detectFaces || state.blurFaces,
+                               hands: state.detectHands || state.detectFingers,
+                               fingers: state.detectFingers)
+            }
+        }
+        let blurRects = state.blurFaces ? vision.faceRects() : []
+
         var outSB = sb
         var outPB = pb
-        if state.look != .none, let filtered = renderFiltered(pb, state) {
+        if state.look != .none || !blurRects.isEmpty, let filtered = renderFiltered(pb, state, blurRects: blurRects) {
             var timing = CMSampleTimingInfo()
             CMSampleBufferGetSampleTimingInfo(sb, at: 0, timingInfoOut: &timing)
             if let made = makeSampleBuffer(pixelBuffer: filtered, timing: timing) {
@@ -1011,7 +1170,31 @@ final class CameraEngine: NSObject, ObservableObject {
         if layer.isReadyForMoreMediaData { layer.enqueue(sb) }
     }
 
-    private func renderFiltered(_ pb: CVPixelBuffer, _ state: RenderState) -> CVPixelBuffer? {
+    private func makeSmallBuffer(from pb: CVPixelBuffer) -> CVPixelBuffer? {
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
+        let scale = 640.0 / Double(max(w, h))
+        let sw = max(Int(Double(w) * scale), 16), sh = max(Int(Double(h) * scale), 16)
+        if smallPool == nil || smallPoolSize != (sw, sh) {
+            let attrs: [String: Any] = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: sw,
+                kCVPixelBufferHeightKey as String: sh,
+                kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any]()
+            ]
+            var pool: CVPixelBufferPool?
+            CVPixelBufferPoolCreate(nil, nil, attrs as CFDictionary, &pool)
+            smallPool = pool
+            smallPoolSize = (sw, sh)
+        }
+        guard let pool = smallPool else { return nil }
+        var out: CVPixelBuffer?
+        guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &out) == kCVReturnSuccess, let dst = out else { return nil }
+        let img = CIImage(cvPixelBuffer: pb).transformed(by: CGAffineTransform(scaleX: CGFloat(scale), y: CGFloat(scale)))
+        ciContext.render(img, to: dst)
+        return dst
+    }
+
+    private func renderFiltered(_ pb: CVPixelBuffer, _ state: RenderState, blurRects: [CGRect]) -> CVPixelBuffer? {
         let w = CVPixelBufferGetWidth(pb)
         let h = CVPixelBufferGetHeight(pb)
         if pixelPool == nil || poolSize != (w, h) {
@@ -1032,7 +1215,8 @@ final class CameraEngine: NSObject, ObservableObject {
         guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &out) == kCVReturnSuccess, let dst = out else { return nil }
 
         let src = CIImage(cvPixelBuffer: pb)
-        let result = videoRenderer.apply(look: state.look, lut: state.lut, intensity: state.intensity, to: src)
+        let base = blurRects.isEmpty ? src : FaceBlur.apply(src, faces: blurRects)
+        let result = videoRenderer.apply(look: state.look, lut: state.lut, intensity: state.intensity, to: base)
         ciContext.render(result, to: dst, bounds: src.extent, colorSpace: rec709)
 
         CVBufferSetAttachment(dst, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
@@ -1060,6 +1244,10 @@ final class CameraEngine: NSObject, ObservableObject {
 
     private func appendVideo(_ sb: CMSampleBuffer, to rec: Recording) {
         guard rec.writer.status == .writing else { return }
+        if rec.cfg.decimate > 1 {
+            rec.rawIndex += 1
+            if (rec.rawIndex - 1) % rec.cfg.decimate != 0 { return }
+        }
         let pts = CMSampleBufferGetPresentationTimeStamp(sb)
         let retimed = rec.cfg.mode != .video
 
@@ -1183,8 +1371,9 @@ extension CameraEngine: AVCapturePhotoCaptureDelegate {
             return
         }
         let state = currentRenderState()
-        if state.look != .none,
-           let ci = CIImage(data: data, options: [.applyOrientationProperty: true]) {
+        if state.look != .none || state.blurFaces,
+           var ci = CIImage(data: data, options: [.applyOrientationProperty: true]) {
+            if state.blurFaces { ci = FaceBlur.apply(ci, faces: VisionTracker.detectFaces(in: ci)) }
             let out = photoRenderer.apply(look: state.look, lut: state.lut, intensity: state.intensity, to: ci)
             let cs = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
             let key = CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String)

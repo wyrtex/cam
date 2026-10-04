@@ -162,3 +162,10 @@ func formatRemaining(_ seconds: Double) -> String {
     let t = Int(min(seconds, 99 * 3600))
     return String(format: "%d:%02d:%02d", t / 3600, (t % 3600) / 60, t % 60)
 }
+
+enum HighFPSSaveMode: String, CaseIterable, Identifiable {
+    case files = "Файлы (реальная скорость)"
+    case photosSlowmo = "Фото (iOS покажет как слоу-мо)"
+    case photosReal60 = "Фото, реальная скорость 60 fps"
+    var id: String { rawValue }
+}

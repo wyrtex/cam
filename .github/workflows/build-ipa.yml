@@ -37,6 +37,7 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build > build.log 2>&1 || {
               echo "=== ERRORS ==="; grep -E "error:" build.log | sort -u | head -60
+              grep -E "error:" build.log | sort -u | head -12 | sed -E 's#^.*/(Cam/[^ ]*)#\1#' | while read -r line; do echo "::error::${line}"; done
               echo "=== TAIL ==="; tail -n 40 build.log
               exit 1
             }
@@ -49,6 +50,8 @@ jobs:
           cp -R build/Build/Products/Release-iphoneos/Cam.app Payload/
           zip -qry Cam.ipa Payload
           ls -lh Cam.ipa
+          echo "::notice title=IPA layout::$(find Payload -maxdepth 4 \( -name '*.appex' -o -name 'Extensions' -o -name 'PlugIns' \) | tr '\n' ' ')"
+          echo "::notice title=Extension plists::$(find Payload -name Info.plist -path '*appex*' | head -3 | tr '\n' ' ')"
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4

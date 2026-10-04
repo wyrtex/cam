@@ -89,13 +89,42 @@ struct LevelOverlay: View {
 // MARK: - Focus indicator
 
 struct FocusIndicator: View {
+    var locked: Bool = false
     @State private var appear = false
     var body: some View {
-        Rectangle()
-            .stroke(Color.yellow, lineWidth: 1.5)
-            .frame(width: 72, height: 72)
-            .scaleEffect(appear ? 1 : 1.35)
-            .onAppear { withAnimation(.easeOut(duration: 0.25)) { appear = true } }
+        ZStack {
+            Rectangle()
+                .stroke(locked ? Theme.yellow : Color.yellow, lineWidth: locked ? 2.5 : 1.5)
+                .frame(width: 72, height: 72)
+            if locked {
+                Image(systemName: "lock.fill").font(.system(size: 12)).foregroundColor(Theme.yellow).offset(y: -52)
+            }
+        }
+        .scaleEffect(appear ? 1 : 1.35)
+        .onAppear { withAnimation(.easeOut(duration: 0.25)) { appear = true } }
+    }
+}
+
+// MARK: - Vision detections (preview only)
+
+struct DetectionOverlay: View {
+    let d: Detections
+    let faces: Bool
+    let hands: Bool
+    let fingers: Bool
+
+    var body: some View {
+        Canvas { ctx, size in
+            func box(_ r: CGRect, _ color: Color, _ lw: CGFloat) {
+                let rect = CGRect(x: r.minX * size.width, y: r.minY * size.height,
+                                  width: r.width * size.width, height: r.height * size.height)
+                ctx.stroke(Path(roundedRect: rect, cornerRadius: 3), with: .color(color), lineWidth: lw)
+            }
+            if faces { for r in d.faces { box(r, Color.green, 2) } }
+            if hands { for r in d.hands { box(r, Color.cyan, 2) } }
+            if fingers { for r in d.fingers { box(r, Color.orange, 1.5) } }
+        }
+        .allowsHitTesting(false)
     }
 }
 

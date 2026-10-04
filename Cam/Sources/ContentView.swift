@@ -22,16 +22,14 @@ struct ContentView: View {
     @State private var focusToken = 0
     @State private var pinchBase: CGFloat?
     @State private var flashOpacity: Double = 0
+    @State private var touchLocation: CGPoint = .zero
+    @State private var longPressStamp = Date.distantPast
 
     var body: some View {
         ZStack {
             Theme.bg.ignoresSafeArea()
-            VStack(spacing: 0) {
-                TopBar(engine: engine, sheet: $sheet)
-                ParamStrip(engine: engine, param: $param, sheet: $sheet)
-                middle
-                ModePicker(engine: engine)
-                BottomBar(engine: engine)
+            GeometryReader { geo in
+                if geo.size.width > geo.size.height { landscapeLayout } else { portraitLayout }
             }
             if let msg = engine.statusMessage {
                 VStack {
@@ -71,6 +69,31 @@ struct ContentView: View {
         }
     }
 
+    private var portraitLayout: some View {
+        VStack(spacing: 0) {
+            TopBar(engine: engine, sheet: $sheet)
+            ParamStrip(engine: engine, param: $param, sheet: $sheet)
+            middle
+            ModePicker(engine: engine, vertical: false)
+            BottomBar(engine: engine, vertical: false)
+        }
+    }
+
+    private var landscapeLayout: some View {
+        HStack(spacing: 0) {
+            VStack(spacing: 0) {
+                TopBar(engine: engine, sheet: $sheet)
+                ParamStrip(engine: engine, param: $param, sheet: $sheet)
+                middle
+            }
+            HStack(spacing: 0) {
+                ModePicker(engine: engine, vertical: true)
+                BottomBar(engine: engine, vertical: true)
+            }
+            .background(Theme.bg)
+        }
+    }
+
     // MARK: Middle region (preview + overlays)
 
     private var middle: some View {
@@ -97,20 +120,25 @@ struct ContentView: View {
             CameraPreview(engine: engine)
             FrameGuideOverlay(guide: engine.guide)
             GridOverlay(type: engine.grid)
+            DetectionOverlay(d: engine.detections, faces: engine.detectFaces,
+                             hands: engine.detectHands, fingers: engine.detectFingers)
             if engine.showLevel { LevelOverlay(roll: engine.rollDegrees) }
             GeometryReader { g in
                 ZStack {
                     Color.clear.contentShape(Rectangle())
                         .gesture(
                             SpatialTapGesture().onEnded { v in
-                                let n = CGPoint(x: v.location.x / max(g.size.width, 1), y: v.location.y / max(g.size.height, 1))
-                                engine.focus(at: n)
-                                focusPoint = v.location
-                                focusToken += 1
-                                let token = focusToken
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                                    if token == focusToken { focusPoint = nil }
-                                }
+                                if Date().timeIntervalSince(longPressStamp) < 0.8 { return }
+                                handleTap(v.location, in: g.size)
+                            }
+                        )
+                        .simultaneousGesture(
+                            DragGesture(minimumDistance: 0).onChanged { v in touchLocation = v.location }
+                        )
+                        .simultaneousGesture(
+                            LongPressGesture(minimumDuration: 0.45).onEnded { _ in
+                                longPressStamp = Date()
+                                handleLongPress(touchLocation, in: g.size)
                             }
                         )
                         .simultaneousGesture(
@@ -122,12 +150,53 @@ struct ContentView: View {
                                 .onEnded { _ in pinchBase = nil }
                         )
                     if let fp = focusPoint {
-                        FocusIndicator().id(focusToken).position(fp)
+                        FocusIndicator(locked: engine.aeafLocked).id(focusToken).position(fp)
+                    }
+                    if engine.aeafLocked {
+                        VStack {
+                            Text("AE/AF LOCK")
+                                .font(.system(size: 11, weight: .heavy))
+                                .padding(.horizontal, 8).padding(.vertical, 4)
+                                .background(RoundedRectangle(cornerRadius: 5).fill(Theme.yellow))
+                                .foregroundColor(.black)
+                                .padding(.top, 8)
+                            Spacer()
+                        }
+                        .allowsHitTesting(false)
                     }
                 }
             }
         }
         .aspectRatio(ratio, contentMode: .fit)
+    }
+
+    private func showFocus(at loc: CGPoint, keep: Bool) {
+        focusPoint = loc
+        focusToken += 1
+        let token = focusToken
+        if !keep {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                if token == focusToken { focusPoint = nil }
+            }
+        }
+    }
+
+    private func handleTap(_ loc: CGPoint, in size: CGSize) {
+        if engine.aeafLocked {
+            engine.unlockFocusAndExposure()
+            focusPoint = nil
+            return
+        }
+        let n = CGPoint(x: loc.x / max(size.width, 1), y: loc.y / max(size.height, 1))
+        engine.focus(at: n)
+        showFocus(at: loc, keep: false)
+    }
+
+    private func handleLongPress(_ loc: CGPoint, in size: CGSize) {
+        let n = CGPoint(x: loc.x / max(size.width, 1), y: loc.y / max(size.height, 1))
+        engine.lockFocusAndExposure(at: n)
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        showFocus(at: loc, keep: true)
     }
 
     private var infoRow: some View {
@@ -464,21 +533,35 @@ struct StoragePanel: View {
 
 struct ModePicker: View {
     @ObservedObject var engine: CameraEngine
+    let vertical: Bool
 
     var body: some View {
-        HStack(spacing: 18) {
-            ForEach(CaptureMode.allCases) { m in
-                Button { engine.setMode(m) } label: {
-                    Text(m.rawValue)
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundColor(engine.mode == m ? Theme.yellow : .white.opacity(0.7))
-                }
-                .disabled(engine.isRecording)
+        if vertical {
+            VStack(spacing: 16) {
+                Spacer(minLength: 0)
+                items
+                Spacer(minLength: 0)
             }
+            .frame(width: 92)
+            .frame(maxHeight: .infinity)
+            .background(Theme.bg)
+        } else {
+            HStack(spacing: 18) { items }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(Theme.bg)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
-        .background(Theme.bg)
+    }
+
+    private var items: some View {
+        ForEach(CaptureMode.allCases) { m in
+            Button { engine.setMode(m) } label: {
+                Text(m.rawValue)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(engine.mode == m ? Theme.yellow : .white.opacity(0.7))
+            }
+            .disabled(engine.isRecording)
+        }
     }
 }
 
@@ -486,39 +569,60 @@ struct ModePicker: View {
 
 struct BottomBar: View {
     @ObservedObject var engine: CameraEngine
+    let vertical: Bool
+
+    private var small: CGFloat { vertical ? 40 : 46 }
+    private var shutterSize: CGFloat { vertical ? 62 : 74 }
 
     var body: some View {
-        HStack {
-            Button {
-                if let url = URL(string: "photos-redirect://") { UIApplication.shared.open(url) }
-            } label: {
-                Group {
-                    if let img = engine.lastThumbnail {
-                        Image(uiImage: img).resizable().scaledToFill()
-                    } else {
-                        Image(systemName: "photo.on.rectangle").foregroundColor(.white)
-                    }
-                }
-                .frame(width: 46, height: 46)
-                .background(Color.white.opacity(0.12))
-                .clipShape(RoundedRectangle(cornerRadius: 9))
+        if vertical {
+            VStack(spacing: 8) {
+                thumbnail
+                sideButton(icon: auxIcon, active: auxActive) { auxAction() }
+                Spacer(minLength: 0)
+                shutterButton
+                Spacer(minLength: 0)
+                sideButton(icon: "squareshape.split.3x3", active: engine.grid != .off) { cycleGrid() }
+                sideButton(icon: "arrow.triangle.2.circlepath.camera", active: engine.lens == .front) { engine.flipCamera() }
             }
-
-            Spacer()
-            sideButton(icon: auxIcon, active: auxActive) { auxAction() }
-            Spacer()
-
-            shutterButton
-
-            Spacer()
-            sideButton(icon: "squareshape.split.3x3", active: engine.grid != .off) { cycleGrid() }
-            Spacer()
-            sideButton(icon: "arrow.triangle.2.circlepath.camera", active: engine.lens == .front) { engine.flipCamera() }
+            .padding(.vertical, 8)
+            .frame(width: 66)
+            .frame(maxHeight: .infinity)
+            .background(Theme.bg)
+        } else {
+            HStack {
+                thumbnail
+                Spacer()
+                sideButton(icon: auxIcon, active: auxActive) { auxAction() }
+                Spacer()
+                shutterButton
+                Spacer()
+                sideButton(icon: "squareshape.split.3x3", active: engine.grid != .off) { cycleGrid() }
+                Spacer()
+                sideButton(icon: "arrow.triangle.2.circlepath.camera", active: engine.lens == .front) { engine.flipCamera() }
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 6)
+            .padding(.bottom, 10)
+            .background(Theme.bg)
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 6)
-        .padding(.bottom, 10)
-        .background(Theme.bg)
+    }
+
+    private var thumbnail: some View {
+        Button {
+            if let url = URL(string: "photos-redirect://") { UIApplication.shared.open(url) }
+        } label: {
+            Group {
+                if let img = engine.lastThumbnail {
+                    Image(uiImage: img).resizable().scaledToFill()
+                } else {
+                    Image(systemName: "photo.on.rectangle").foregroundColor(.white)
+                }
+            }
+            .frame(width: small, height: small)
+            .background(Color.white.opacity(0.12))
+            .clipShape(RoundedRectangle(cornerRadius: 9))
+        }
     }
 
     private var auxIcon: String {
@@ -556,8 +660,8 @@ struct BottomBar: View {
     private func sideButton(icon: String, active: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 20))
-                .frame(width: 46, height: 46)
+                .font(.system(size: vertical ? 17 : 20))
+                .frame(width: small, height: small)
                 .background(Circle().fill(active ? Theme.accent : Color.white.opacity(0.12)))
                 .foregroundColor(.white)
         }
@@ -574,13 +678,13 @@ struct BottomBar: View {
             }
         } label: {
             ZStack {
-                Circle().stroke(Color.white, lineWidth: 4).frame(width: 74, height: 74)
+                Circle().stroke(Color.white, lineWidth: 4).frame(width: shutterSize, height: shutterSize)
                 if engine.mode == .photo {
-                    Circle().fill(Color.white).frame(width: 60, height: 60)
+                    Circle().fill(Color.white).frame(width: shutterSize - 14, height: shutterSize - 14)
                 } else if engine.isRecording {
-                    RoundedRectangle(cornerRadius: 6).fill(Theme.rec).frame(width: 30, height: 30)
+                    RoundedRectangle(cornerRadius: 6).fill(Theme.rec).frame(width: shutterSize * 0.4, height: shutterSize * 0.4)
                 } else {
-                    Circle().fill(Theme.rec).frame(width: 60, height: 60)
+                    Circle().fill(Theme.rec).frame(width: shutterSize - 14, height: shutterSize - 14)
                 }
             }
             .animation(.easeOut(duration: 0.15), value: engine.isRecording)

@@ -97,6 +97,14 @@ struct FormatSheet: View {
                 .font(.footnote).foregroundColor(.white.opacity(0.6)).frame(maxWidth: .infinity, alignment: .leading)
         }
 
+        if engine.mode == .video && engine.fps >= 100 {
+            SectionTitle(text: "Сохранение 100+ fps")
+            ChipRow(items: HighFPSSaveMode.allCases, selected: engine.highFPSSave, title: { $0.rawValue },
+                    action: { engine.highFPSSave = $0 }, enabled: !engine.isRecording)
+            Text("Приложение «Фото» всегда показывает видео от 100 fps как слоу-мо. В «Файлах» (На iPhone → Cam Pro) видео играет с реальной скоростью и полным fps.")
+                .font(.footnote).foregroundColor(.white.opacity(0.6)).frame(maxWidth: .infinity, alignment: .leading)
+        }
+
         SectionTitle(text: "Кодек")
         ChipRow(items: VideoCodec.allCases, selected: engine.codec, title: { $0.rawValue },
                 action: { engine.codec = $0 }, enabled: !engine.isRecording)
@@ -253,7 +261,20 @@ struct SettingsSheet: View {
                 .padding(.horizontal, 12)
                 .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.08)))
 
-                Text("Жесты: тап по превью — фокус, щипок — зум.")
+                SectionTitle(text: "Эксперименты · Vision (только превью)")
+                VStack(spacing: 0) {
+                    toggle("Рамки: лица", $engine.detectFaces)
+                    toggle("Рамки: руки", $engine.detectHands)
+                    toggle("Рамки: пальцы", $engine.detectFingers)
+                    toggle("Блюр лиц (в видео и фото)", $engine.blurFaces)
+                }
+                .padding(.horizontal, 12)
+                .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.08)))
+                Text("Рамки рисуются только на экране и не попадают в запись. Блюр лиц, наоборот, применяется к самому видео и фото.")
+                    .font(.footnote).foregroundColor(.white.opacity(0.55))
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
+
+                Text("Жесты: тап — фокус, удержание — блокировка AE/AF (тап снимает), щипок — зум.")
                     .font(.footnote).foregroundColor(.white.opacity(0.55))
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 12)
             }

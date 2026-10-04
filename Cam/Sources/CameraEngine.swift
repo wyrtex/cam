@@ -504,7 +504,7 @@ final class CameraEngine: NSObject, ObservableObject {
         do {
             try d.lockForConfiguration()
             d.videoZoomFactor = minZ
-            if fmt.isSmoothAutoFocusSupported { d.isSmoothAutoFocusEnabled = !isPhoto }
+            if d.isSmoothAutoFocusSupported { d.isSmoothAutoFocusEnabled = !isPhoto }
             d.autoFocusRangeRestriction = .none
             d.unlockForConfiguration()
         } catch {}

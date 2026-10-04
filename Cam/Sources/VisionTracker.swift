@@ -23,6 +23,8 @@ final class VisionTracker {
     private var busy = false
     private var faces: [CGRect] = []
     private var facesTime = CFAbsoluteTimeGetCurrent()
+    private var quadPts: [CGPoint]?
+    private var quadTime = CFAbsoluteTimeGetCurrent()
     var onResult: ((Detections) -> Void)?
 
     func isIdle() -> Bool {
@@ -36,11 +38,18 @@ final class VisionTracker {
         return CFAbsoluteTimeGetCurrent() - facesTime < 0.5 ? faces : []
     }
 
-    func reset() {
-        lock.lock(); faces = []; lock.unlock()
+    /// Latest quad [index1, index2, thumb2, thumb1] (normalized, top-left origin); nil if stale.
+    func quad() -> [CGPoint]? {
+        lock.lock(); defer { lock.unlock() }
+        guard let q = quadPts, CFAbsoluteTimeGetCurrent() - quadTime < 0.25 else { return nil }
+        return q
     }
 
-    func process(_ pb: CVPixelBuffer, faces wantFaces: Bool, hands wantHands: Bool, fingers wantFingers: Bool) {
+    func reset() {
+        lock.lock(); faces = []; quadPts = nil; lock.unlock()
+    }
+
+    func process(_ pb: CVPixelBuffer, faces wantFaces: Bool, hands wantHands: Bool, fingers wantFingers: Bool, quad wantQuad: Bool) {
         lock.lock()
         if busy { lock.unlock(); return }
         busy = true
@@ -48,12 +57,13 @@ final class VisionTracker {
 
         queue.async {
             var result = Detections()
+            var tipPairs: [(idx: CGPoint, thumb: CGPoint)] = []
             var requests: [VNRequest] = []
             let faceReq = VNDetectFaceRectanglesRequest()
             let handReq = VNDetectHumanHandPoseRequest()
             handReq.maximumHandCount = 4
             if wantFaces { requests.append(faceReq) }
-            if wantHands || wantFingers { requests.append(handReq) }
+            if wantHands || wantFingers || wantQuad { requests.append(handReq) }
 
             let handler = VNImageRequestHandler(cvPixelBuffer: pb, orientation: .up, options: [:])
             try? handler.perform(requests)
@@ -61,8 +71,13 @@ final class VisionTracker {
             if wantFaces {
                 result.faces = (faceReq.results ?? []).map { Self.flip($0.boundingBox) }
             }
-            if wantHands || wantFingers {
+            if wantHands || wantFingers || wantQuad {
                 for obs in handReq.results ?? [] {
+                    if wantQuad, let all = try? obs.recognizedPoints(.all),
+                       let i = all[.indexTip], let t = all[.thumbTip], i.confidence > 0.3, t.confidence > 0.3 {
+                        tipPairs.append((CGPoint(x: i.location.x, y: 1 - i.location.y),
+                                         CGPoint(x: t.location.x, y: 1 - t.location.y)))
+                    }
                     if let all = try? obs.recognizedPoints(.all) {
                         let pts = all.values.filter { $0.confidence > 0.25 }.map { $0.location }
                         if let r = Self.bounds(of: pts, pad: 0.02) { result.hands.append(r) }
@@ -87,7 +102,15 @@ final class VisionTracker {
                 }
             }
 
+            var newQuad: [CGPoint]?
+            if wantQuad && tipPairs.count >= 2 {
+                let two = tipPairs.sorted { $0.idx.x < $1.idx.x }.prefix(2)
+                let a = two[two.startIndex], b = two[two.startIndex + 1]
+                newQuad = [a.idx, b.idx, b.thumb, a.thumb]
+            }
+
             self.lock.lock()
+            if let q = newQuad { self.quadPts = q; self.quadTime = CFAbsoluteTimeGetCurrent() }
             if wantFaces { self.faces = result.faces; self.facesTime = CFAbsoluteTimeGetCurrent() }
             self.busy = false
             self.lock.unlock()

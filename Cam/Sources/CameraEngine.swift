@@ -48,6 +48,8 @@ private struct RenderState {
     var detectFingers = false
     var blurFaces = false
     var blurStrength: Double = 0.5
+    var glitchQuad = false
+    var glitchStrength: Double = 0.7
 }
 
 final class CameraEngine: NSObject, ObservableObject {
@@ -97,6 +99,8 @@ final class CameraEngine: NSObject, ObservableObject {
     @Published var detectFingers = false { didSet { visionSettingChanged() } }
     @Published var blurFaces = false { didSet { visionSettingChanged() } }
     @Published var blurStrength: Double = 0.5 { didSet { syncRenderState() } }
+    @Published var glitchQuad = false { didSet { visionSettingChanged() } }
+    @Published var glitchStrength: Double = 0.7 { didSet { syncRenderState() } }
     @Published var detections = Detections()
     @Published var aeafLocked = false
     @Published var highFPSSave: HighFPSSaveMode = .files
@@ -244,13 +248,14 @@ final class CameraEngine: NSObject, ObservableObject {
         stateLock.lock()
         renderState = RenderState(look: look, lut: customLUT, intensity: lookIntensity,
                                   detectFaces: detectFaces, detectHands: detectHands,
-                                  detectFingers: detectFingers, blurFaces: blurFaces, blurStrength: blurStrength)
+                                  detectFingers: detectFingers, blurFaces: blurFaces, blurStrength: blurStrength,
+                                  glitchQuad: glitchQuad, glitchStrength: glitchStrength)
         stateLock.unlock()
     }
 
     private func visionSettingChanged() {
         syncRenderState()
-        if !detectFaces && !detectHands && !detectFingers && !blurFaces {
+        if !detectFaces && !detectHands && !detectFingers && !blurFaces && !glitchQuad {
             vision.reset()
             detections = Detections()
         }
@@ -1118,21 +1123,24 @@ final class CameraEngine: NSObject, ObservableObject {
 
         let state = currentRenderState()
 
-        if state.detectFaces || state.detectHands || state.detectFingers || state.blurFaces {
+        if state.detectFaces || state.detectHands || state.detectFingers || state.blurFaces || state.glitchQuad {
             let now = CFAbsoluteTimeGetCurrent()
             if now - lastVisionTime > 0.04, vision.isIdle(), let small = makeSmallBuffer(from: pb) {
                 lastVisionTime = now
                 vision.process(small,
                                faces: state.detectFaces || state.blurFaces,
                                hands: state.detectHands || state.detectFingers,
-                               fingers: state.detectFingers)
+                               fingers: state.detectFingers,
+                               quad: state.glitchQuad)
             }
         }
         let blurRects = state.blurFaces ? vision.faceRects() : []
+        let glitch = state.glitchQuad ? vision.quad() : nil
 
         var outSB = sb
         var outPB = pb
-        if state.look != .none || !blurRects.isEmpty, let filtered = renderFiltered(pb, state, blurRects: blurRects) {
+        if state.look != .none || !blurRects.isEmpty || glitch != nil,
+           let filtered = renderFiltered(pb, state, blurRects: blurRects, glitch: glitch) {
             var timing = CMSampleTimingInfo()
             CMSampleBufferGetSampleTimingInfo(sb, at: 0, timingInfoOut: &timing)
             if let made = makeSampleBuffer(pixelBuffer: filtered, timing: timing) {
@@ -1197,7 +1205,7 @@ final class CameraEngine: NSObject, ObservableObject {
         return dst
     }
 
-    private func renderFiltered(_ pb: CVPixelBuffer, _ state: RenderState, blurRects: [CGRect]) -> CVPixelBuffer? {
+    private func renderFiltered(_ pb: CVPixelBuffer, _ state: RenderState, blurRects: [CGRect], glitch: [CGPoint]?) -> CVPixelBuffer? {
         let w = CVPixelBufferGetWidth(pb)
         let h = CVPixelBufferGetHeight(pb)
         if pixelPool == nil || poolSize != (w, h) {
@@ -1219,7 +1227,8 @@ final class CameraEngine: NSObject, ObservableObject {
 
         let src = CIImage(cvPixelBuffer: pb)
         let base = blurRects.isEmpty ? src : FaceBlur.apply(src, faces: blurRects, strength: state.blurStrength)
-        let result = videoRenderer.apply(look: state.look, lut: state.lut, intensity: state.intensity, to: base)
+        var result = videoRenderer.apply(look: state.look, lut: state.lut, intensity: state.intensity, to: base)
+        if let q = glitch { result = GlitchQuad.apply(result, quad: q, seed: UInt64(frameCounter), strength: state.glitchStrength) }
         ciContext.render(result, to: dst, bounds: src.extent, colorSpace: rec709)
 
         CVBufferSetAttachment(dst, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
@@ -1374,10 +1383,11 @@ extension CameraEngine: AVCapturePhotoCaptureDelegate {
             return
         }
         let state = currentRenderState()
-        if state.look != .none || state.blurFaces,
+        if state.look != .none || state.blurFaces || state.glitchQuad,
            var ci = CIImage(data: data, options: [.applyOrientationProperty: true]) {
             if state.blurFaces { ci = FaceBlur.apply(ci, faces: VisionTracker.detectFaces(in: ci), strength: state.blurStrength) }
-            let out = photoRenderer.apply(look: state.look, lut: state.lut, intensity: state.intensity, to: ci)
+            var out = photoRenderer.apply(look: state.look, lut: state.lut, intensity: state.intensity, to: ci)
+            if state.glitchQuad, let q = vision.quad() { out = GlitchQuad.apply(out, quad: q, seed: UInt64(Date().timeIntervalSince1970 * 1000), strength: state.glitchStrength) }
             let cs = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
             let key = CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String)
             if let jpeg = ciContext.jpegRepresentation(of: out, colorSpace: cs, options: [key: 0.95]) {

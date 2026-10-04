@@ -267,9 +267,21 @@ struct SettingsSheet: View {
                     toggle("Рамки: руки", $engine.detectHands)
                     toggle("Рамки: пальцы", $engine.detectFingers)
                     toggle("Блюр лиц (в видео и фото)", $engine.blurFaces)
+                    toggle("Глитч-квадрат: 2 указательных + 2 больших", $engine.glitchQuad)
                 }
                 .padding(.horizontal, 12)
                 .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.08)))
+                if engine.glitchQuad {
+                    SectionTitle(text: "Сила глитча")
+                    HStack {
+                        Slider(value: $engine.glitchStrength, in: 0.1...1)
+                        Text("\(Int(engine.glitchStrength * 100))%")
+                            .font(.system(size: 13, weight: .semibold, design: .monospaced)).foregroundColor(.white)
+                            .frame(width: 48)
+                    }
+                    Text("Покажи обе руки: указательные и большие пальцы образуют четырёхугольник (указательный → указательный → большой → большой), внутри — инверсия и глитч. Эффект попадает в видео и фото.")
+                        .font(.footnote).foregroundColor(.white.opacity(0.55)).frame(maxWidth: .infinity, alignment: .leading)
+                }
                 if engine.blurFaces {
                     SectionTitle(text: "Жёсткость блюра")
                     HStack {

@@ -187,3 +187,12 @@ enum QuadEffect: String, CaseIterable, Identifiable, Hashable {
         }
     }
 }
+
+enum QuadEffect: String, CaseIterable, Identifiable {
+    case invert = "Инверсия"
+    case glitch = "Глитч"
+    case mosaic = "Мозаика"
+    case blur = "Размытие"
+    case thermal = "Тепловизор"
+    var id: String { rawValue }
+}

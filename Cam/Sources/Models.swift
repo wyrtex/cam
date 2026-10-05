@@ -169,3 +169,21 @@ enum HighFPSSaveMode: String, CaseIterable, Identifiable {
     case photosReal60 = "Фото, реальная скорость 60 fps"
     var id: String { rawValue }
 }
+
+enum QuadEffect: String, CaseIterable, Identifiable, Hashable {
+    case invert = "Инверсия"
+    case glitch = "Глитч"
+    case mosaic = "Мозаика"
+    case twirl = "Вихрь"
+    case thermal = "Тепловизор"
+    var id: String { rawValue }
+    var icon: String {
+        switch self {
+        case .invert: return "circle.lefthalf.filled"
+        case .glitch: return "waveform.path.ecg"
+        case .mosaic: return "square.grid.3x3.fill"
+        case .twirl: return "tornado"
+        case .thermal: return "thermometer.sun.fill"
+        }
+    }
+}

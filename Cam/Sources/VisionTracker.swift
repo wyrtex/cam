@@ -164,7 +164,7 @@ enum FaceBlur {
             ])?.outputImage else { continue }
             mask = g.cropped(to: e).applyingFilter("CILightenBlendMode", parameters: [kCIInputBackgroundImageKey: mask])
         }
-        let sigma = max(2.0, Double(e.width) * (0.001 + 0.03 * pow(max(0, min(1, strength)), 1.5)))
+        let sigma = max(1.5, Double(e.width) * (0.0005 + 0.015 * pow(max(0, min(1, strength)), 1.5)))
         let blurred = image.clampedToExtent().applyingGaussianBlur(sigma: sigma).cropped(to: e)
         return blurred
             .applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: image, kCIInputMaskImageKey: mask])

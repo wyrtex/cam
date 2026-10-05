@@ -279,7 +279,22 @@ struct SettingsSheet: View {
                             .font(.system(size: 13, weight: .semibold, design: .monospaced)).foregroundColor(.white)
                             .frame(width: 48)
                     }
-                    Text("Покажи обе руки: указательные и большие пальцы образуют четырёхугольник (указательный → указательный → большой → большой), внутри — инверсия и глитч. Эффект попадает в видео и фото.")
+                    SectionTitle(text: "Эффекты внутри квадрата (можно несколько)")
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 8)], spacing: 8) {
+                        ForEach(QuadEffect.allCases) { fx in
+                            let on = engine.quadEffects.contains(fx)
+                            Button {
+                                if on { engine.quadEffects.remove(fx) } else { engine.quadEffects.insert(fx) }
+                            } label: {
+                                Label(fx.rawValue, systemImage: fx.icon)
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .frame(maxWidth: .infinity).padding(.vertical, 10)
+                                    .background(RoundedRectangle(cornerRadius: 9).fill(on ? Theme.accent : Color.white.opacity(0.12)))
+                                    .foregroundColor(.white)
+                            }
+                        }
+                    }
+                    Text("Покажи обе руки: указательные и большие пальцы образуют четырёхугольник (указательный → указательный → большой → большой). Выбранные эффекты применяются внутри него и попадают в видео и фото.")
                         .font(.footnote).foregroundColor(.white.opacity(0.55)).frame(maxWidth: .infinity, alignment: .leading)
                 }
                 if engine.blurFaces {

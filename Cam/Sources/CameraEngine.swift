@@ -50,6 +50,7 @@ private struct RenderState {
     var blurStrength: Double = 0.5
     var glitchQuad = false
     var glitchStrength: Double = 0.7
+    var quadEffects: Set<QuadEffect> = [.invert, .glitch]
 }
 
 final class CameraEngine: NSObject, ObservableObject {
@@ -101,6 +102,7 @@ final class CameraEngine: NSObject, ObservableObject {
     @Published var blurStrength: Double = 0.5 { didSet { syncRenderState() } }
     @Published var glitchQuad = false { didSet { visionSettingChanged() } }
     @Published var glitchStrength: Double = 0.7 { didSet { syncRenderState() } }
+    @Published var quadEffects: Set<QuadEffect> = [.invert, .glitch] { didSet { syncRenderState() } }
     @Published var detections = Detections()
     @Published var aeafLocked = false
     @Published var highFPSSave: HighFPSSaveMode = .files
@@ -249,7 +251,8 @@ final class CameraEngine: NSObject, ObservableObject {
         renderState = RenderState(look: look, lut: customLUT, intensity: lookIntensity,
                                   detectFaces: detectFaces, detectHands: detectHands,
                                   detectFingers: detectFingers, blurFaces: blurFaces, blurStrength: blurStrength,
-                                  glitchQuad: glitchQuad, glitchStrength: glitchStrength)
+                                  glitchQuad: glitchQuad, glitchStrength: glitchStrength,
+                                  quadEffects: quadEffects)
         stateLock.unlock()
     }
 
@@ -344,6 +347,13 @@ final class CameraEngine: NSObject, ObservableObject {
         session.commitConfiguration()
 
         guard let d = device else { return }
+        // Never carry flash/torch over to another camera (front screen would go full-white).
+        do {
+            try d.lockForConfiguration()
+            if d.hasTorch, d.torchMode != .off { d.torchMode = .off }
+            d.unlockForConfiguration()
+        } catch {}
+        onMain { self.torchOn = false; self.flash = .off }
         setupRotation(for: d)
         applyMirroring(front: newLens == .front)
         refreshCapabilities()
@@ -896,6 +906,14 @@ final class CameraEngine: NSObject, ObservableObject {
 
     // MARK: - Photo
 
+    /// Shutter via hardware buttons: photo in photo mode, start/stop in video modes.
+    func primaryAction() {
+        guard authorized else { return }
+        if mode == .photo { capturePhoto() }
+        else if isRecording { stopRecording() }
+        else { startRecording() }
+    }
+
     func capturePhoto() {
         guard mode == .photo, !isRecording else { return }
         let flashMode = flash.mode
@@ -915,7 +933,9 @@ final class CameraEngine: NSObject, ObservableObject {
                     settings = AVCapturePhotoSettings()
                 }
                 if let dims { settings.maxPhotoDimensions = dims }
-                if d.hasFlash, self.photoOutput.supportedFlashModes.contains(flashMode) { settings.flashMode = flashMode }
+                // Flash (incl. the front-screen "Retina Flash") only when explicitly chosen.
+                if d.hasFlash, flashMode != .off, self.photoOutput.supportedFlashModes.contains(flashMode) { settings.flashMode = flashMode }
+                else { settings.flashMode = .off }
             }
             self.applyRotation()
             self.photoOutput.capturePhoto(with: settings, delegate: self)
@@ -1228,7 +1248,7 @@ final class CameraEngine: NSObject, ObservableObject {
         let src = CIImage(cvPixelBuffer: pb)
         let base = blurRects.isEmpty ? src : FaceBlur.apply(src, faces: blurRects, strength: state.blurStrength)
         var result = videoRenderer.apply(look: state.look, lut: state.lut, intensity: state.intensity, to: base)
-        if let q = glitch { result = GlitchQuad.apply(result, quad: q, seed: UInt64(frameCounter), strength: state.glitchStrength) }
+        if let q = glitch { result = GlitchQuad.apply(result, quad: q, seed: UInt64(frameCounter), strength: state.glitchStrength, effects: state.quadEffects) }
         ciContext.render(result, to: dst, bounds: src.extent, colorSpace: rec709)
 
         CVBufferSetAttachment(dst, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
@@ -1387,7 +1407,7 @@ extension CameraEngine: AVCapturePhotoCaptureDelegate {
            var ci = CIImage(data: data, options: [.applyOrientationProperty: true]) {
             if state.blurFaces { ci = FaceBlur.apply(ci, faces: VisionTracker.detectFaces(in: ci), strength: state.blurStrength) }
             var out = photoRenderer.apply(look: state.look, lut: state.lut, intensity: state.intensity, to: ci)
-            if state.glitchQuad, let q = vision.quad() { out = GlitchQuad.apply(out, quad: q, seed: UInt64(Date().timeIntervalSince1970 * 1000), strength: state.glitchStrength) }
+            if state.glitchQuad, let q = vision.quad() { out = GlitchQuad.apply(out, quad: q, seed: UInt64(Date().timeIntervalSince1970 * 1000), strength: state.glitchStrength, effects: state.quadEffects) }
             let cs = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
             let key = CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String)
             if let jpeg = ciContext.jpegRepresentation(of: out, colorSpace: cs, options: [key: 0.95]) {

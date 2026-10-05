@@ -310,6 +310,20 @@ struct SettingsSheet: View {
                     .font(.footnote).foregroundColor(.white.opacity(0.55))
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
 
+                SectionTitle(text: "Селфи")
+                VStack(spacing: 0) {
+                    toggle("Подсветка экраном: белый экран, макс. яркость", $engine.selfieLight)
+                }
+                .padding(.horizontal, 12)
+                .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.08)))
+                Text("Работает на фронтальной камере при фото и записи видео. Яркость возвращается после съёмки.")
+                    .font(.footnote).foregroundColor(.white.opacity(0.55))
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
+
+                Text("Кнопки громкости (±) работают как затвор: фото в режиме ФОТО, старт/стоп записи в видеорежимах.")
+                    .font(.footnote).foregroundColor(.white.opacity(0.55))
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
+
                 Text("Жесты: тап — фокус, удержание — блокировка AE/AF (тап снимает), щипок — зум.")
                     .font(.footnote).foregroundColor(.white.opacity(0.55))
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 12)

@@ -103,6 +103,8 @@ final class CameraEngine: NSObject, ObservableObject {
     @Published var glitchQuad = false { didSet { visionSettingChanged() } }
     @Published var glitchStrength: Double = 0.7 { didSet { syncRenderState() } }
     @Published var quadEffects: Set<QuadEffect> = [.invert, .glitch] { didSet { syncRenderState() } }
+    @Published var selfieLight = true
+    @Published var screenLight = false
     @Published var detections = Detections()
     @Published var aeafLocked = false
     @Published var highFPSSave: HighFPSSaveMode = .files
@@ -220,6 +222,9 @@ final class CameraEngine: NSObject, ObservableObject {
         NotificationCenter.default.addObserver(forName: AVCaptureDevice.subjectAreaDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self, !self.aeafLocked else { return }
             self.resetFocusToContinuous()
+        }
+        NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.setScreenLight(false)
         }
         NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] _ in
             self?.updateMicName()
@@ -914,7 +919,38 @@ final class CameraEngine: NSObject, ObservableObject {
         else { startRecording() }
     }
 
+    private var savedBrightness: CGFloat?
+
+    /// Selfie "screen flash": white screen at max brightness lights the face.
+    func setScreenLight(_ on: Bool) {
+        onMain {
+            self.screenLight = on
+            if on {
+                if self.savedBrightness == nil { self.savedBrightness = UIScreen.main.brightness }
+                UIScreen.main.brightness = 1.0
+            } else if let b = self.savedBrightness {
+                UIScreen.main.brightness = b
+                self.savedBrightness = nil
+            }
+        }
+    }
+
     func capturePhoto() {
+        guard mode == .photo, !isRecording else { return }
+        if lens == .front && selfieLight {
+            guard !screenLight else { return }
+            setScreenLight(true)
+            // give auto-exposure a moment to adapt to the lit face
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                self.doCapturePhoto()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { self.setScreenLight(false) }
+            }
+            return
+        }
+        doCapturePhoto()
+    }
+
+    private func doCapturePhoto() {
         guard mode == .photo, !isRecording else { return }
         let flashMode = flash.mode
         let dims = photoResolution?.dims
@@ -1025,6 +1061,7 @@ final class CameraEngine: NSObject, ObservableObject {
                                decimate: decimate, saveToFiles: toFiles)
         isRecording = true
         recordingFlag = true
+        if lens == .front && selfieLight { setScreenLight(true) }
         recordSeconds = 0
         recordStart = Date()
         recordTimer?.invalidate()
@@ -1039,6 +1076,7 @@ final class CameraEngine: NSObject, ObservableObject {
     func stopRecording() {
         guard isRecording else { return }
         isRecording = false
+        setScreenLight(false)
         recordTimer?.invalidate()
         recordTimer = nil
         captureQueue.async {

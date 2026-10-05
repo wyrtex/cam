@@ -44,13 +44,13 @@ struct ContentView: View {
                 .transition(.opacity)
                 .allowsHitTesting(false)
             }
-            Color.black.opacity(flashOpacity).ignoresSafeArea().allowsHitTesting(false)
+            Color.white.opacity(flashOpacity).ignoresSafeArea().allowsHitTesting(false)
         }
         .onAppear { engine.start(); engine.histogramVisible = engine.showHistogram }
         .onChange(of: engine.showHistogram) { _, v in engine.histogramVisible = v }
         .onChange(of: engine.photoFlashTick) { _, _ in
-            flashOpacity = 0.55
-            withAnimation(.easeOut(duration: 0.18)) { flashOpacity = 0 }
+            flashOpacity = 0.85
+            withAnimation(.easeOut(duration: 0.25)) { flashOpacity = 0 }
         }
         .sheet(item: $sheet) { s in
             switch s {
@@ -101,6 +101,7 @@ struct ContentView: View {
         ZStack {
             Color.black
             previewStack
+            if engine.screenLight { Color.white.allowsHitTesting(false) }
             VStack(spacing: 8) {
                 Spacer()
                 if let p = param {
